@@ -19,6 +19,7 @@ class OrderSerializer(serializers.ModelSerializer):
     customer = serializers.ReadOnlyField(source="customer.username")
     restaurant = serializers.ReadOnlyField(source="restaurant.name")
     items = OrderItemSerializer(many=True, read_only=True)
+    coupon_code = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -26,6 +27,10 @@ class OrderSerializer(serializers.ModelSerializer):
             "id", "order_number", "customer", "restaurant", "status",
             "delivery_address", "subtotal", "discount_amount",
             "delivery_fee", "tax_amount", "total_amount",
+            "coupon", "coupon_code",
             "idempotency_key", "items", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+    def get_coupon_code(self, obj):
+        return obj.coupon.code if obj.coupon_id else None

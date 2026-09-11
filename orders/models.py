@@ -76,8 +76,13 @@ class Order(models.Model):
         max_digits=10, decimal_places=2, default=Decimal("0.00")
     )
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    # Coupon FK intentionally omitted — Module 4 hasn't been built yet.
-    # NOTE: no field-level unique=True anymore — see Meta.unique_together below.
+    coupon = models.ForeignKey(
+        "coupons.Coupon",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders",
+    )
     idempotency_key = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
