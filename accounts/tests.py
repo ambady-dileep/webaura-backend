@@ -85,3 +85,48 @@ class RegistrationAPITests(APITestCase):
             "role": Role.CUSTOMER,
         })
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        
+from rest_framework_simplejwt.tokens import RefreshToken
+# (add this import at the top with the others)
+
+
+class JWTAuthTests(APITestCase):
+    def setUp(self):
+        self.login_url = reverse("login")
+        self.refresh_url = reverse("refresh")
+        self.user = User.objects.create_user(
+            username="jwtuser", password="StrongPass123!", role=Role.CUSTOMER
+        )
+
+    def test_login_with_valid_credentials_returns_tokens(self):
+        response = self.client.post(self.login_url, {
+            "username": "jwtuser",
+            "password": "StrongPass123!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+
+    def test_login_with_invalid_password_is_rejected(self):
+        response = self.client.post(self.login_url, {
+            "username": "jwtuser",
+            "password": "WrongPassword!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_login_with_nonexistent_user_is_rejected(self):
+        response = self.client.post(self.login_url, {
+            "username": "doesnotexist",
+            "password": "whatever123",
+        })
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_refresh_with_valid_token_returns_new_access_token(self):
+        refresh = RefreshToken.for_user(self.user)
+        response = self.client.post(self.refresh_url, {"refresh": str(refresh)})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+
+    def test_refresh_with_invalid_token_is_rejected(self):
+        response = self.client.post(self.refresh_url, {"refresh": "not-a-real-token"})
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
