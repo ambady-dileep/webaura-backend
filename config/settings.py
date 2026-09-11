@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "accounts",
     "restaurants",
+    "orders",
 ]
 
 MIDDLEWARE = [
