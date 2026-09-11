@@ -323,3 +323,178 @@ class CheckoutViewTests(TestCase):
         )
         self.assertEqual(second.status_code, 201)
         self.assertNotEqual(first.data["order_number"], second.data["order_number"])
+        
+        
+class OrderVisibilityTests(TestCase):
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            username="vis_owner_a", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.owner_b = User.objects.create_user(
+            username="vis_owner_b", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.customer_a = User.objects.create_user(
+            username="vis_customer_a", password="StrongPass123!", role=Role.CUSTOMER
+        )
+        self.customer_b = User.objects.create_user(
+            username="vis_customer_b", password="StrongPass123!", role=Role.CUSTOMER
+        )
+        self.restaurant_a = Restaurant.objects.create(owner=self.owner_a, name="A Place", address="X")
+        self.restaurant_b = Restaurant.objects.create(owner=self.owner_b, name="B Place", address="Y")
+        self.address_a = Address.objects.create(
+            customer=self.customer_a, full_address="1 St", city="Kochi",
+            pincode="682001", phone_number="9999999999",
+        )
+        self.order_a = Order.objects.create(
+            customer=self.customer_a, restaurant=self.restaurant_a,
+            delivery_address=self.address_a,
+            subtotal=Decimal("100.00"), total_amount=Decimal("100.00"),
+        )
+        self.order_b_by_customer_a = Order.objects.create(
+            customer=self.customer_a, restaurant=self.restaurant_b,
+            delivery_address=self.address_a,
+            subtotal=Decimal("50.00"), total_amount=Decimal("50.00"),
+        )
+        self.client = APIClient()
+
+    def test_customer_sees_only_their_own_orders(self):
+        self.client.force_authenticate(user=self.customer_a)
+        response = self.client.get("/api/orders/")
+
+        order_numbers = {
+            o["order_number"]
+            for o in response.data["results"]
+        }
+
+        self.assertEqual(
+            order_numbers,
+            {
+                self.order_a.order_number,
+                self.order_b_by_customer_a.order_number,
+            },
+        )
+
+    def test_customer_b_sees_no_orders(self):
+        self.client.force_authenticate(user=self.customer_b)
+        response = self.client.get("/api/orders/")
+
+        self.assertEqual(
+            len(response.data["results"]),
+            0,
+        )
+
+    def test_restaurant_owner_sees_only_their_restaurants_orders(self):
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.get("/api/orders/")
+
+        order_numbers = {
+            o["order_number"]
+            for o in response.data["results"]
+        }
+
+        self.assertEqual(
+            order_numbers,
+            {self.order_a.order_number},
+        )
+
+    def test_restaurant_owner_b_does_not_see_restaurant_a_orders(self):
+        self.client.force_authenticate(user=self.owner_b)
+        response = self.client.get("/api/orders/")
+
+        order_numbers = {
+            o["order_number"]
+            for o in response.data["results"]
+        }
+
+        self.assertEqual(
+            order_numbers,
+            {self.order_b_by_customer_a.order_number},
+        )
+
+    def test_customer_cannot_retrieve_another_customers_order_detail(self):
+        self.client.force_authenticate(user=self.customer_b)
+        response = self.client.get(f"/api/orders/{self.order_a.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_owner_cannot_retrieve_another_restaurants_order_detail(self):
+        self.client.force_authenticate(user=self.owner_b)
+        response = self.client.get(f"/api/orders/{self.order_a.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_owner_can_retrieve_their_own_restaurants_order_detail(self):
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.get(f"/api/orders/{self.order_a.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["order_number"], self.order_a.order_number)
+        
+        
+class OrderStatusUpdateTests(TestCase):
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            username="status_owner_a", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.owner_b = User.objects.create_user(
+            username="status_owner_b", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.customer = User.objects.create_user(
+            username="status_customer", password="StrongPass123!", role=Role.CUSTOMER
+        )
+        self.admin = User.objects.create_user(
+            username="status_admin", password="StrongPass123!", role=Role.ADMIN
+        )
+        self.restaurant_a = Restaurant.objects.create(owner=self.owner_a, name="A Place", address="X")
+        self.address = Address.objects.create(
+            customer=self.customer, full_address="1 St", city="Kochi",
+            pincode="682001", phone_number="9999999999",
+        )
+        self.order = Order.objects.create(
+            customer=self.customer, restaurant=self.restaurant_a,
+            delivery_address=self.address,
+            subtotal=Decimal("100.00"), total_amount=Decimal("100.00"),
+        )
+        self.client = APIClient()
+        self.url = f"/api/orders/{self.order.id}/status/"
+
+    def test_owner_can_accept_their_own_order(self):
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.patch(self.url, {"status": "accepted"})
+        self.assertEqual(response.status_code, 200)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "accepted")
+
+    def test_other_owner_cannot_update_this_order(self):
+        self.client.force_authenticate(user=self.owner_b)
+        response = self.client.patch(self.url, {"status": "accepted"})
+        self.assertEqual(response.status_code, 403)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "placed")
+
+    def test_customer_cannot_update_order_status(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch(self.url, {"status": "accepted"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_update_any_order_status(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(self.url, {"status": "accepted"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_illegal_transition_returns_400_with_clear_message(self):
+        self.order.status = "delivered"
+        self.order.save()
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.patch(self.url, {"status": "placed"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Cannot transition order", response.data["detail"])
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, "delivered")
+
+    def test_invalid_status_string_returns_400(self):
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.patch(self.url, {"status": "not_a_real_status"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_status_field_returns_400(self):
+        self.client.force_authenticate(user=self.owner_a)
+        response = self.client.patch(self.url, {})
+        self.assertEqual(response.status_code, 400)

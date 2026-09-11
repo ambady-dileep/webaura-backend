@@ -10,6 +10,15 @@ from .models import Address, Order, OrderItem
 from .serializers import OrderSerializer
 
 
+from accounts.models import Role
+from rest_framework import generics
+from rest_framework.permissions import IsAuthenticated
+
+from django.shortcuts import get_object_or_404
+from .models import InvalidStatusTransition, OrderStatus
+from .permissions import CanUpdateOrderStatus
+
+
 class CheckoutView(APIView):
     permission_classes = [IsCustomer]
 
@@ -112,3 +121,57 @@ class CheckoutView(APIView):
             cart.save()
 
         return Response(OrderSerializer(order).data, status=201)
+    
+    
+def get_orders_queryset(user):
+    base = Order.objects.select_related("customer", "restaurant").prefetch_related(
+        "items__food_item"
+    )
+    if user.role == Role.CUSTOMER:
+        return base.filter(customer=user)
+    if user.role == Role.RESTAURANT_OWNER:
+        return base.filter(restaurant__owner=user)
+    if user.role == Role.ADMIN:
+        return base
+    return base.none()
+
+
+class OrderListView(generics.ListAPIView):
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return get_orders_queryset(self.request.user).order_by("-created_at")
+
+
+class OrderDetailView(generics.RetrieveAPIView):
+    serializer_class = OrderSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return get_orders_queryset(self.request.user)
+    
+    
+class OrderStatusUpdateView(APIView):
+    permission_classes = [CanUpdateOrderStatus]
+
+    def patch(self, request, pk):
+        order = get_object_or_404(Order.objects.select_related("restaurant"), pk=pk)
+        self.check_object_permissions(request, order)
+
+        new_status = request.data.get("status")
+        if not new_status:
+            return Response({"detail": "status is required."}, status=400)
+        if new_status not in OrderStatus.values:
+            return Response(
+                {"detail": f"'{new_status}' is not a valid order status."}, status=400
+            )
+
+        try:
+            with transaction.atomic():
+                order.transition_to(new_status)
+                order.save()
+        except InvalidStatusTransition as e:
+            return Response({"detail": str(e)}, status=400)
+
+        return Response(OrderSerializer(order).data, status=200)
