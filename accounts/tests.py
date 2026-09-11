@@ -3,6 +3,10 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
+from rest_framework.test import APIRequestFactory
+from django.contrib.auth.models import AnonymousUser
+from accounts.permissions import IsCustomer, IsRestaurantOwner, IsDeliveryPartner, IsAdmin
+from config.celery import app as celery_app
 
 from accounts.models import Role, User
 
@@ -130,3 +134,71 @@ class JWTAuthTests(APITestCase):
     def test_refresh_with_invalid_token_is_rejected(self):
         response = self.client.post(self.refresh_url, {"refresh": "not-a-real-token"})
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        
+class RolePermissionTests(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.customer = User.objects.create_user(
+            username="perm_customer", password="StrongPass123!", role=Role.CUSTOMER
+        )
+        self.owner = User.objects.create_user(
+            username="perm_owner", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.rider = User.objects.create_user(
+            username="perm_rider", password="StrongPass123!", role=Role.DELIVERY_PARTNER
+        )
+        self.admin = User.objects.create_user(
+            username="perm_admin", password="StrongPass123!", role=Role.ADMIN
+        )
+
+    def _request_as(self, user):
+        request = self.factory.get("/")
+        request.user = user
+        return request
+
+    def test_is_customer_allows_customer(self):
+        request = self._request_as(self.customer)
+        self.assertTrue(IsCustomer().has_permission(request, None))
+
+    def test_is_customer_rejects_other_roles(self):
+        request = self._request_as(self.owner)
+        self.assertFalse(IsCustomer().has_permission(request, None))
+
+    def test_is_restaurant_owner_allows_owner(self):
+        request = self._request_as(self.owner)
+        self.assertTrue(IsRestaurantOwner().has_permission(request, None))
+
+    def test_is_restaurant_owner_rejects_other_roles(self):
+        request = self._request_as(self.rider)
+        self.assertFalse(IsRestaurantOwner().has_permission(request, None))
+
+    def test_is_delivery_partner_allows_rider(self):
+        request = self._request_as(self.rider)
+        self.assertTrue(IsDeliveryPartner().has_permission(request, None))
+
+    def test_is_delivery_partner_rejects_other_roles(self):
+        request = self._request_as(self.admin)
+        self.assertFalse(IsDeliveryPartner().has_permission(request, None))
+
+    def test_is_admin_allows_admin(self):
+        request = self._request_as(self.admin)
+        self.assertTrue(IsAdmin().has_permission(request, None))
+
+    def test_is_admin_rejects_other_roles(self):
+        request = self._request_as(self.customer)
+        self.assertFalse(IsAdmin().has_permission(request, None))
+
+    def test_unauthenticated_user_rejected_by_all_permissions(self):
+        request = self._request_as(AnonymousUser())
+        self.assertFalse(IsCustomer().has_permission(request, None))
+        self.assertFalse(IsRestaurantOwner().has_permission(request, None))
+        self.assertFalse(IsDeliveryPartner().has_permission(request, None))
+        self.assertFalse(IsAdmin().has_permission(request, None))
+        
+class CeleryConfigTests(TestCase):
+    def test_celery_app_is_configured_with_redis_broker(self):
+        self.assertTrue(celery_app.conf.broker_url.startswith("redis://"))
+
+    def test_celery_result_backend_is_redis(self):
+        self.assertTrue(celery_app.conf.result_backend.startswith("redis://"))
+        
