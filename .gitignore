@@ -1,7 +1,20 @@
-.venv/
+venv/
 __pycache__/
 *.pyc
 .env
 db.sqlite3
 .idea/
 .vscode/
+celerybeat-schedule*
+
+# Python
+*.pyo
+*.egg-info/
+
+# Django
+staticfiles/
+media/
+
+# Test artifacts
+.coverage
+htmlcov/
