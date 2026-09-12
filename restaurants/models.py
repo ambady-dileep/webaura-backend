@@ -8,7 +8,7 @@ class Restaurant(models.Model):
         on_delete=models.CASCADE,
         related_name="restaurants",
     )
-    name = models.CharField(max_length=255)
+    name = models.CharField(max_length=255, db_index=True)
     description = models.TextField(blank=True)
     address = models.TextField()
     is_active = models.BooleanField(default=True)

@@ -121,7 +121,7 @@ class DeliveryStatusUpdateView(APIView):
 
     def patch(self, request, pk):
         delivery = get_object_or_404(
-            Delivery.objects.select_related("order"), pk=pk
+            Delivery.objects.select_related("order", "delivery_partner"), pk=pk
         )
         self.check_object_permissions(request, delivery)
 

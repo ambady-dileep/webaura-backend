@@ -28,7 +28,11 @@ class ApplyCouponView(APIView):
     permission_classes = [IsCustomer]
 
     def post(self, request, pk):
-        order = get_object_or_404(Order, pk=pk, customer=request.user)
+        order = get_object_or_404(
+            Order.objects.select_related("customer", "restaurant", "coupon"),
+            pk=pk,
+            customer=request.user,
+        )
 
         if order.status != OrderStatus.PLACED:
             return Response(
@@ -103,5 +107,13 @@ class ApplyCouponView(APIView):
             # request from double-counting the same order.
             Coupon.objects.filter(pk=coupon.pk).update(times_used=F("times_used") + 1)
 
-        order.refresh_from_db()
+        # refresh_from_db() would clear the select_related above and bring
+        # back an N+1 on serialization (customer/restaurant/coupon/items
+        # would each re-query lazily) — re-fetch with the same relations
+        # instead so OrderSerializer stays a single round trip.
+        order = (
+            Order.objects.select_related("customer", "restaurant", "coupon")
+            .prefetch_related("items__food_item")
+            .get(pk=order.pk)
+        )
         return Response(OrderSerializer(order).data, status=200)

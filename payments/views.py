@@ -33,7 +33,11 @@ class MockPaymentView(APIView):
     def post(self, request, order_id):
         order = get_object_or_404(Order, pk=order_id, customer=request.user)
 
-        payment, _ = Payment.objects.get_or_create(
+        # select_related("order") avoids a lazy query for order.order_number
+        # in PaymentSerializer on the "already exists" (not created) branch —
+        # get_or_create() only caches the FK we already have in hand when it
+        # actually creates a new row, not when it finds an existing one.
+        payment, _ = Payment.objects.select_related("order").get_or_create(
             order=order, defaults={"amount": order.total_amount}
         )
 

@@ -3,6 +3,10 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 from accounts.models import Role, User
 from .models import Restaurant, Category, FoodItem, CartItem, Cart
+from django.core.cache import cache
+from django.test.utils import CaptureQueriesContext
+from django.db import connection
+from .cache import restaurant_list_cache_key, restaurant_menu_cache_key
 from decimal import Decimal
 
 
@@ -94,10 +98,6 @@ class RestaurantAPITests(APITestCase):
         url = reverse("restaurant-detail", args=[restaurant.id])
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        
-        
-        
         
         
 class MenuAPITests(APITestCase):
@@ -240,6 +240,7 @@ class MenuAPITests(APITestCase):
         
         
         
+       
 class CartAPITests(APITestCase):
     def setUp(self):
         self.owner = User.objects.create_user(
@@ -353,3 +354,155 @@ class CartAPITests(APITestCase):
         self.client.force_authenticate(user=self.owner)
         response = self.client.get(reverse("cart-detail"))
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        
+        
+
+class RestaurantAndMenuCachingTests(APITestCase):
+    """
+    Module 6.1 — verifies the actual caching behavior, not just that the
+    code runs: a repeat GET is served from the cached response body (not
+    recomputed from the DB), and a write to the underlying model correctly
+    busts that cache. Requires a real Redis instance reachable at the
+    CACHES["default"]["LOCATION"] configured in settings.py.
+    """
+ 
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            username="cache_owner", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.customer = User.objects.create_user(
+            username="cache_customer", password="StrongPass123!", role=Role.CUSTOMER
+        )
+        self.restaurant = Restaurant.objects.create(
+            owner=self.owner, name="Cache Place", address="X"
+        )
+        self.category = Category.objects.create(restaurant=self.restaurant, name="Mains")
+        self.food_item = FoodItem.objects.create(
+            restaurant=self.restaurant, category=self.category,
+            name="Original Name", price=Decimal("100.00"),
+        )
+        self.list_url = reverse("restaurant-list")
+        self.menu_url = reverse("restaurant-menu", args=[self.restaurant.id])
+ 
+    def tearDown(self):
+        cache.clear()
+ 
+    def test_menu_list_key_is_populated_after_a_get(self):
+        self.client.get(self.menu_url)
+        key = restaurant_menu_cache_key(self.restaurant.id, {})
+        self.assertIsNotNone(cache.get(key))
+ 
+    def test_menu_served_from_cache_survives_a_bypassed_db_write(self):
+        # First request populates the cache.
+        first = self.client.get(self.menu_url)
+        self.assertEqual(first.data["results"][0]["name"], "Original Name")
+ 
+        # .update() bypasses save() and therefore never fires the
+        # post_save signal that busts the cache — so if the second
+        # request still shows the OLD name, we've proven the response
+        # really came from the cache and not a fresh query.
+        FoodItem.objects.filter(pk=self.food_item.id).update(name="Changed Behind Cache's Back")
+ 
+        second = self.client.get(self.menu_url)
+        self.assertEqual(second.data["results"][0]["name"], "Original Name")
+ 
+    def test_menu_cache_invalidated_when_food_item_saved(self):
+        self.client.get(self.menu_url)  # populate cache
+        self.food_item.price = Decimal("250.00")
+        self.food_item.save()  # fires post_save -> busts restaurants:menu:<id>:*
+ 
+        response = self.client.get(self.menu_url)
+        self.assertEqual(response.data["results"][0]["price"], "250.00")
+ 
+    def test_menu_cache_invalidated_when_restaurant_deactivated(self):
+        self.client.get(self.menu_url)  # populate cache while active
+        self.restaurant.is_active = False
+        self.restaurant.save()  # fires post_save -> busts this restaurant's menu keys too
+ 
+        response = self.client.get(self.menu_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+ 
+    def test_inactive_restaurant_menu_is_never_cached(self):
+        self.restaurant.is_active = False
+        self.restaurant.save()
+        # Owner can still see their own inactive restaurant's menu.
+        self.client.force_authenticate(user=self.owner)
+        self.client.get(self.menu_url)
+        key = restaurant_menu_cache_key(self.restaurant.id, {})
+        self.assertIsNone(cache.get(key))
+ 
+    def test_restaurant_list_cache_invalidated_on_new_restaurant(self):
+        self.client.get(self.list_url)  # populate cache: 1 restaurant
+        Restaurant.objects.create(owner=self.owner, name="Second Place", address="Y")
+ 
+        response = self.client.get(self.list_url)
+        names = [r["name"] for r in response.data["results"]]
+        self.assertIn("Second Place", names)
+ 
+    def test_restaurant_owner_view_is_never_cached(self):
+        # Populate the public cache first (as an anonymous visitor).
+        self.client.get(self.list_url)
+        public_key = restaurant_list_cache_key({})
+        self.assertIsNotNone(cache.get(public_key))
+ 
+        # The owner's own request must reflect their inactive restaurant
+        # even though a public cache entry already exists — proving the
+        # owner's view was computed fresh, not served from that entry.
+        Restaurant.objects.create(
+            owner=self.owner, name="My Hidden Place", address="Z", is_active=False
+        )
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.get(self.list_url)
+        names = [r["name"] for r in response.data["results"]]
+        self.assertIn("My Hidden Place", names)
+ 
+ 
+class RestaurantMenuQueryCountTests(APITestCase):
+    """
+    Module 6.2 — locks in the select_related("restaurant","category") fix
+    on RestaurantMenuView so a future regression (someone removing it)
+    fails this test instead of silently reintroducing an N+1.
+    """
+ 
+    def setUp(self):
+        cache.clear()
+        self.owner = User.objects.create_user(
+            username="qc_owner", password="StrongPass123!", role=Role.RESTAURANT_OWNER
+        )
+        self.restaurant = Restaurant.objects.create(
+            owner=self.owner, name="Query Count Place", address="X"
+        )
+        self.category = Category.objects.create(restaurant=self.restaurant, name="Mains")
+        for i in range(8):
+            FoodItem.objects.create(
+                restaurant=self.restaurant, category=self.category,
+                name=f"Item {i}", price=Decimal("50.00"),
+            )
+        self.menu_url = reverse("restaurant-menu", args=[self.restaurant.id])
+ 
+    def tearDown(self):
+        cache.clear()
+ 
+    def test_menu_query_count_does_not_grow_with_item_count(self):
+        with CaptureQueriesContext(connection) as small:
+            self.client.get(self.menu_url)
+        cache.clear()
+ 
+        for i in range(8, 16):
+            FoodItem.objects.create(
+                restaurant=self.restaurant, category=self.category,
+                name=f"Item {i}", price=Decimal("50.00"),
+            )
+        cache.clear()
+ 
+        with CaptureQueriesContext(connection) as large:
+            self.client.get(self.menu_url)
+ 
+        # Same query count for 8 items vs 16 items proves select_related
+        # is doing its job instead of issuing one extra query per item.
+        self.assertEqual(len(small.captured_queries), len(large.captured_queries))
+        # A generous cap, not an exact count — this is a regression guard,
+        # not a claim about the "correct" number of queries.
+        self.assertLessEqual(len(large.captured_queries), 6)
+ 

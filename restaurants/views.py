@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -8,6 +9,11 @@ from rest_framework.views import APIView
 
 from accounts.models import Role
 from accounts.permissions import IsCustomer
+from .cache import (
+    CACHE_TTL_SECONDS,
+    restaurant_list_cache_key,
+    restaurant_menu_cache_key,
+)
 from .models import Cart, CartItem, Category, FoodItem, Restaurant
 from .permissions import IsOwnerOrReadOnly, IsRestaurantOwnerOfNested
 from .serializers import (
@@ -38,6 +44,27 @@ class RestaurantListCreateView(generics.ListCreateAPIView):
             queryset = queryset.filter(name__icontains=search)
         return queryset.order_by("id")
 
+    def list(self, request, *args, **kwargs):
+        # visible_restaurants_for() gives a restaurant_owner an extra row
+        # (their own inactive restaurants) that no one else sees. That
+        # response is per-user, not the shared public listing, so it must
+        # never be served from — or written to — the public cache.
+        user = request.user
+        is_owner_view = bool(
+            user and user.is_authenticated and user.role == Role.RESTAURANT_OWNER
+        )
+        if is_owner_view:
+            return super().list(request, *args, **kwargs)
+
+        cache_key = restaurant_list_cache_key(request.query_params)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        response = super().list(request, *args, **kwargs)
+        cache.set(cache_key, response.data, CACHE_TTL_SECONDS)
+        return response
+
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
 
@@ -58,11 +85,37 @@ class RestaurantMenuView(generics.ListAPIView):
         restaurant = get_object_or_404(
             visible_restaurants_for(self.request.user), pk=self.kwargs["pk"]
         )
-        queryset = FoodItem.objects.filter(restaurant=restaurant, is_available=True)
+        queryset = (
+            FoodItem.objects.filter(restaurant=restaurant, is_available=True)
+            .select_related("restaurant", "category")
+        )
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(name__icontains=search)
         return queryset.order_by("id")
+
+    def list(self, request, *args, **kwargs):
+        restaurant_id = self.kwargs["pk"]
+        # Only cache the genuinely public case. An inactive restaurant's
+        # menu is only ever reachable by its own owner — get_object_or_404
+        # in get_queryset() above 404s it for everyone else — so it's not
+        # shared public data and must always be computed fresh, never read
+        # from or written to the cache.
+        is_public = Restaurant.objects.filter(
+            pk=restaurant_id, is_active=True
+        ).exists()
+
+        if not is_public:
+            return super().list(request, *args, **kwargs)
+
+        cache_key = restaurant_menu_cache_key(restaurant_id, request.query_params)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
+        response = super().list(request, *args, **kwargs)
+        cache.set(cache_key, response.data, CACHE_TTL_SECONDS)
+        return response
 
 
 class CategoryListCreateView(generics.ListCreateAPIView):
@@ -87,7 +140,7 @@ class FoodItemCreateView(generics.CreateAPIView):
 
 
 class FoodItemDetailView(generics.RetrieveUpdateAPIView):
-    queryset = FoodItem.objects.all()
+    queryset = FoodItem.objects.select_related("restaurant", "category")
     serializer_class = FoodItemSerializer
     permission_classes = [IsRestaurantOwnerOfNested]
     
