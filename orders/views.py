@@ -18,6 +18,7 @@ from django.shortcuts import get_object_or_404
 from .models import InvalidStatusTransition, OrderStatus
 from .permissions import CanUpdateOrderStatus
 
+from notifications.tasks import send_order_confirmation_notification, expire_unaccepted_order
 
 class CheckoutView(APIView):
     permission_classes = [IsCustomer]
@@ -119,6 +120,11 @@ class CheckoutView(APIView):
             CartItem.objects.filter(id__in=cart_items_ids).delete()
             cart.restaurant = None
             cart.save()
+
+        # Fire only after the checkout transaction has actually committed —
+        # a rolled-back checkout must never notify or start an expiry timer.
+        send_order_confirmation_notification.delay(order.id)
+        expire_unaccepted_order.apply_async(args=[order.id], countdown=300)
 
         return Response(OrderSerializer(order).data, status=201)
     

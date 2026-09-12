@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 from pathlib import Path
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -42,6 +43,7 @@ INSTALLED_APPS = [
     "coupons",
     "payments",
     "deliveries",
+    "notifications",
 ]
 
 MIDDLEWARE = [
@@ -151,3 +153,18 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE  # reuses your existing TIME_ZONE = "UTC" setting
+
+
+CELERY_BEAT_SCHEDULE = {
+    "daily-restaurant-sales-summary": {
+        "task": "notifications.tasks.daily_restaurant_sales_summary",
+        "schedule": crontab(hour=23, minute=55),
+    },
+}
+
+# Retry demo knob for send_order_confirmation_notification. Leave at 0 for
+# normal use; set to 1.0 (env var or override_settings in tests) to force
+# every attempt to fail and watch the 3x retry in the worker log.
+NOTIFICATION_SIMULATED_FAILURE_RATE = config(
+    "NOTIFICATION_SIMULATED_FAILURE_RATE", default=0.0, cast=float
+)
