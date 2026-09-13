@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from accounts.models import Role, User
 from orders.models import Address, Order, OrderStatus
@@ -165,3 +166,48 @@ class DailyRestaurantSalesSummaryTests(NotificationTaskTestsBase):
         daily_restaurant_sales_summary.delay()
 
         self.assertEqual(Notification.objects.count(), 0)
+        
+class NotificationListAPITests(NotificationTaskTestsBase):
+    """GET /api/notifications/"""
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+
+    def test_requires_authentication(self):
+        response = self.client.get("/api/notifications/")
+        self.assertEqual(response.status_code, 401)
+
+    def test_returns_only_the_authenticated_users_notifications(self):
+        order = self._create_order()
+        Notification.objects.create(
+            user=self.customer, order=order, message="Your order is confirmed."
+        )
+        Notification.objects.create(
+            user=self.owner, order=order, message="New order received."
+        )
+
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get("/api/notifications/")
+
+        self.assertEqual(response.status_code, 200)
+        results = response.data["results"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["message"], "Your order is confirmed.")
+        self.assertEqual(results[0]["order_number"], order.order_number)
+
+    def test_returns_newest_first(self):
+        order = self._create_order()
+        first = Notification.objects.create(
+            user=self.customer, order=order, message="First"
+        )
+        second = Notification.objects.create(
+            user=self.customer, order=order, message="Second"
+        )
+
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get("/api/notifications/")
+
+        results = response.data["results"]
+        self.assertEqual(results[0]["id"], second.id)
+        self.assertEqual(results[1]["id"], first.id)

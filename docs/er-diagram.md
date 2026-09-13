@@ -1,5 +1,7 @@
 # WebAura — Entity-Relationship Diagram
 
+![WebAura ER Diagram](er-diagram.png)
+
 Rendered with [Mermaid](https://mermaid.js.org/) — GitHub, GitLab, and most
 modern Markdown viewers render this block natively with no extra tooling.
 If your viewer doesn't, paste the block between the fences into
